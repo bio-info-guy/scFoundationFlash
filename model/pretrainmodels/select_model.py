@@ -21,7 +21,8 @@ def select_module(config, sub_config, module_name):
             max_seq_len=config['seq_len'],
             dim=sub_config['hidden_dim'],
             depth=sub_config['depth'],
-            heads=sub_config['heads']
+            heads=sub_config['heads'],
+            fast_transformers=sub_config.get('fast_transformer', False)
         )
     else:
         print('module type error')

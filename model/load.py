@@ -7,7 +7,7 @@ import numpy as np
 import random
 from pretrainmodels import select_model
 import math
-
+from collections import OrderedDict
 def next_16x(x):
     return int(math.ceil(x / 16) * 16)
 
@@ -98,7 +98,7 @@ def convertconfig(ckpt):
     newconfig['config']['device']='cuda'
     return newconfig
 
-def load_model(best_ckpt_path, device):
+def load_model(best_ckpt_path, device, flash = False):
     model_data = torch.load(best_ckpt_path,map_location=device)
     if not model_data.__contains__('config'):
         print('***** No config *****')
@@ -116,12 +116,22 @@ def load_model(best_ckpt_path, device):
                 config['qv_dim']= 64
     if not config.__contains__('ppi_edge'):
         config['ppi_edge']=None
+    config['encoder']['fast_transformer'] = flash
     model = select_model(config)
-    model_state_dict = model_data['model_state_dict']    
+    model_state_dict = model_data['model_state_dict']   
+    if flash:
+        model_state_dict = OrderedDict([
+            (k.replace("in_proj_weight", "in_proj.weight")
+            .replace("in_proj_bias", "in_proj.bias")
+            .replace("out_proj_weight", "out_proj.weight")
+            .replace("out_proj_bias", "out_proj.bias"), v)
+            for k, v in model_state_dict.items()
+        ])
+    print(model_state_dict.keys())
     model.load_state_dict(model_state_dict)
     return model.cuda(),config
 
-def load_model_frommmf(best_ckpt_path, key='gene'):
+def load_model_frommmf(best_ckpt_path, key='gene', flash = True):
     model_data = torch.load(best_ckpt_path,map_location='cpu')
     model_data = model_data[key]
     model_data = convertconfig(model_data)
@@ -141,10 +151,46 @@ def load_model_frommmf(best_ckpt_path, key='gene'):
                 config['qv_dim']= 64
     if not config.__contains__('ppi_edge'):
         config['ppi_edge']=None
+    config['encoder']['fast_transformer'] = flash
     model = select_model(config)
-    model_state_dict = model_data['model_state_dict']    
+    model_state_dict = model_data['model_state_dict']   
+    if flash:
+        model_state_dict = OrderedDict([
+            (k.replace("in_proj_weight", "in_proj.weight")
+            .replace("in_proj_bias", "in_proj.bias")
+            .replace("out_proj_weight", "out_proj.weight")
+            .replace("out_proj_bias", "out_proj.bias"), v)
+            for k, v in model_state_dict.items()
+        ])
+    print(model_state_dict.keys()) 
     model.load_state_dict(model_state_dict)
     return model.cuda(),config
+
+
+def load_model_frommmf_with_flash(best_ckpt_path, key='gene'):
+    FLASH = False
+    try:
+    # Assuming 'flash_attn_interface' is the newer package/module
+        from flash_attn_interface import flash_attn_qkvpacked_func, flash_attn_varlen_func
+        FLASH_ATTENTION_VERSION = '3'
+        print("✅ Detected Flash Attention v3.")
+        FLASH = True
+    except ImportError:
+        # 3. If the first import fails, try the next one
+        try:
+            from flash_attn import flash_attn_qkvpacked_func, flash_attn_varlen_func
+            FLASH_ATTENTION_VERSION = '2'
+            print("✅ Detected Flash Attention v2.")
+            FLASH = True
+        except ImportError:
+            # 4. If all imports fail, provide a notice
+            print("⚠️ Flash Attention not installed. Model will use standard attention.")
+    if not FLASH:
+        return load_model_frommmf(best_ckpt_path, key)
+    else:
+        pass
+    pass
+
 
 def main_gene_selection(X_df, gene_list):
     """
