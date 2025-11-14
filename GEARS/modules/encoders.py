@@ -24,6 +24,32 @@ sys.path.append("../model/")
 from load import *
 
 
+def convertconfig(ckpt):
+    newconfig = {}
+    newconfig['config']={}
+    model_type = ckpt['config']['model']
+    
+    for key, val in ckpt['config']['model_config'][model_type].items():
+        newconfig['config'][key]=val
+        
+    for key, val in ckpt['config']['dataset_config']['rnaseq'].items():
+        newconfig['config'][key]=val
+        
+    if model_type == 'performergau_resolution':
+        model_type = 'performer_gau'
+    
+    import collections
+    d = collections.OrderedDict()
+    for key, val in ckpt['state_dict'].items():
+        d[str(key).split('model.')[1]]=val
+        
+    newconfig['config']['model_type']=model_type
+    newconfig['model_state_dict']=d
+    newconfig['config']['pos_embed']=False
+    newconfig['config']['device']='cuda'
+    return newconfig
+
+
 def next_16x(x):
     return int(math.ceil(x / 16) * 16)
 
@@ -94,7 +120,8 @@ def select_module(config, sub_config, module_name):
             max_seq_len=config['seq_len'],
             dim=sub_config['hidden_dim'],
             depth=sub_config['depth'],
-            heads=sub_config['heads']
+            heads=sub_config['heads'],
+            fast_transformers=sub_config.get('fast_transformer', False)
         )
 
     else:
@@ -209,9 +236,10 @@ class PerformerLikeEncoder(nn.Module):
         return self.m.forward(x, return_encodings=True)
 
 class MAEAutobinencoder(nn.Module):
-    def __init__(self, config, hidden_size=None):
+    def __init__(self, config, hidden_size=None, flash = True):
         super().__init__()
         self.config = config
+        self.flash = flash
         ckp = torch.load(self.config['load_path'])
         ckp = ckp['gene']
         ckp = convertconfig(ckp)
@@ -227,6 +255,7 @@ class MAEAutobinencoder(nn.Module):
         self.model_type = model_type
         kwargs = self.init_module(ckp)
         self.num_tokens = model_config["n_class"]
+        
 
         assert hidden_size is None or hidden_size == model_config['decoder']['hidden_dim'], f"gears.hidden_size ({hidden_size}) should be equal to dim ({kwargs['decoder_embed_dim']})"
 
@@ -235,6 +264,7 @@ class MAEAutobinencoder(nn.Module):
         model_config = self.model_config
 
         encoder_config =model_config['encoder']
+        encoder_config['fast_transformer'] = self.flash
         decoder_config = model_config['decoder']
         encoder = select_module(model_config, encoder_config, model_config['encoder']['module_type'])
         decoder = select_module(model_config, decoder_config, model_config['decoder']['module_type'])
@@ -253,8 +283,17 @@ class MAEAutobinencoder(nn.Module):
         model.encoder = encoder
         model.decoder = decoder
         self.m = model
-        m_state_dict = ckp["model_state_dict"]
-        self.m.load_state_dict(m_state_dict)
+        model_state_dict = ckp['model_state_dict']   
+        if self.flash:
+            model_state_dict = OrderedDict([
+                (k.replace("in_proj_weight", "in_proj.weight")
+                .replace("in_proj_bias", "in_proj.bias")
+                .replace("out_proj_weight", "out_proj.weight")
+                .replace("out_proj_bias", "out_proj.bias"), v)
+                for k, v in model_state_dict.items()
+            ])
+        print(model_state_dict.keys())
+        self.m.load_state_dict(model_state_dict)
         self.m.to_final = None
         return kwargs
 

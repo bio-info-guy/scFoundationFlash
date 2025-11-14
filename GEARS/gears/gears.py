@@ -155,7 +155,17 @@ class GEARS:
         
         if self.config['G_coexpress'] is None:
             ## calculating co expression similarity graph
-            edge_list = get_similarity_network(network_type = 'co-express', adata = self.adata, threshold = coexpress_threshold, k = num_similar_genes_co_express_graph, gene_list = self.gene_list, data_path = self.data_path, data_name = self.dataset_name, split = self.split, seed = self.seed, train_gene_set_size = self.train_gene_set_size, set2conditions = self.set2conditions)
+            edge_list = get_similarity_network(network_type='co-express',
+                                               adata= self.adata,
+                                               threshold = coexpress_threshold,
+                                               k = num_similar_genes_co_express_graph, 
+                                               gene_list = self.gene_list, 
+                                               data_path = self.data_path, 
+                                               data_name = self.dataset_name, 
+                                               split = self.split, 
+                                               seed = self.seed, 
+                                               train_gene_set_size = self.train_gene_set_size, 
+                                               set2conditions = self.set2conditions)
             sim_network = GeneSimNetwork(edge_list, self.gene_list, node_map = self.node_map)
             self.config['G_coexpress'] = sim_network.edge_index
             self.config['G_coexpress_weight'] = sim_network.edge_weight
@@ -163,7 +173,19 @@ class GEARS:
         if self.config['G_go'] is None:
             print('No G_go')
             ## calculating gene ontology similarity graph
-            edge_list = get_similarity_network(network_type = 'go', adata = self.adata, threshold = coexpress_threshold, k = num_similar_genes_go_graph, gene_list = self.pert_list, data_path = self.data_path, data_name = self.dataset_name, split = self.split, seed = self.seed, train_gene_set_size = self.train_gene_set_size, set2conditions = self.set2conditions, gi_go = self.gi_go, dataset = go_path)
+            edge_list = get_similarity_network(network_type = 'go',
+                                               adata = self.adata,
+                                               threshold = coexpress_threshold,
+                                               k = num_similar_genes_go_graph,
+                                               gene_list = self.pert_list,
+                                               data_path = self.data_path,
+                                               data_name = self.dataset_name,
+                                               split = self.split,
+                                               seed = self.seed,
+                                               train_gene_set_size = self.train_gene_set_size,
+                                               set2conditions = self.set2conditions,
+                                               gi_go = self.gi_go,
+                                               dataset = go_path)
             sim_network = GeneSimNetwork(edge_list, self.pert_list, node_map = self.node_map_pert)
             self.config['G_go'] = sim_network.edge_index
             self.config['G_go_weight'] = sim_network.edge_weight

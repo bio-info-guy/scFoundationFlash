@@ -359,3 +359,16 @@ def get_mean_control(adata):
     cols = adata.var.gene_name.values.astype('str')
     mean_ctrl_exp = adata[adata.obs['condition'] == 'ctrl'].to_df().mean()
     return mean_ctrl_exp
+
+
+def get_genes_from_perts(perts):
+    """
+    Returns list of genes involved in a given perturbation list
+    """
+
+    if type(perts) is str:
+        perts = [perts]
+    gene_list = [p.split('+') for p in np.unique(perts)]
+    gene_list = [item for sublist in gene_list for item in sublist]
+    gene_list = [g for g in gene_list if g != 'ctrl']
+    return list(np.unique(gene_list))
