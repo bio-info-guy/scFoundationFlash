@@ -6,8 +6,10 @@ from sklearn.metrics import r2_score
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import mean_squared_error as mse
 from sklearn.metrics import mean_absolute_error as mae
+from tqdm import tqdm
 
-def evaluate(loader, model, uncertainty, device):
+
+def evaluate(loader, model, uncertainty, device, amp = True):
     """
     Run model in inference mode using a given data loader
     """
@@ -21,13 +23,10 @@ def evaluate(loader, model, uncertainty, device):
     truth_de = []
     results = {}
     logvar = []
-    
-    for itr, batch in enumerate(loader):
-
+    for itr, batch in enumerate(tqdm(loader, miniters=int(len(loader)/20))):
         batch.to(device)
         pert_cat.extend(batch.pert)
-
-        with torch.no_grad():
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled = amp):
             if uncertainty:
                 p, unc = model(batch)
                 logvar.extend(unc.cpu())

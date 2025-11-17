@@ -6,7 +6,7 @@ import pickle
 
 import scanpy as sc
 import numpy as np
-
+from tqdm.auto import tqdm
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -32,10 +32,11 @@ class GEARS:
                  proj_name = 'GEARS', 
                  exp_name = 'GEARS',
                  pred_scalar = False,
-                 gi_predict = False):
+                 gi_predict = False,
+                 amp = True):
         
         self.weight_bias_track = weight_bias_track
-        
+        self.amp = amp
         if self.weight_bias_track:
             import wandb
             wandb.init(project=proj_name, name=exp_name)  
@@ -57,8 +58,8 @@ class GEARS:
         self.train_gene_set_size = pert_data.train_gene_set_size
         self.set2conditions = pert_data.set2conditions
         self.subgroup = pert_data.subgroup
-        self.gi_go = pert_data.gi_go
-        self.gi_predict = gi_predict
+        self.default_pert_graph = pert_data.default_pert_graph
+        self.gi_predict = False
         self.gene_list = pert_data.gene_names.values.tolist()
         self.pert_list = pert_data.pert_names.tolist()
         self.num_genes = len(self.gene_list)
@@ -114,7 +115,8 @@ class GEARS:
                          finetune_method=None,
                          accumulation_steps=1,
                          mode='v1',
-                         highres=0
+                         highres=0,
+                         deepspeed = False
                         ):
         
         self.config = {'hidden_size': hidden_size,
@@ -149,7 +151,7 @@ class GEARS:
         print('Use mode:',mode)
         print('Use higres:',highres)
 
-        
+        self.deepspeed = deepspeed
         if self.wandb:
             self.wandb.config.update(self.config)
         
@@ -159,13 +161,11 @@ class GEARS:
                                                adata= self.adata,
                                                threshold = coexpress_threshold,
                                                k = num_similar_genes_co_express_graph, 
-                                               gene_list = self.gene_list, 
                                                data_path = self.data_path, 
                                                data_name = self.dataset_name, 
-                                               split = self.split, 
-                                               seed = self.seed, 
+                                               split = self.split, seed = self.seed, 
                                                train_gene_set_size = self.train_gene_set_size, 
-                                               set2conditions = self.set2conditions)
+                                               set2conditions = self.set2conditions, device = self.device)
             sim_network = GeneSimNetwork(edge_list, self.gene_list, node_map = self.node_map)
             self.config['G_coexpress'] = sim_network.edge_index
             self.config['G_coexpress_weight'] = sim_network.edge_weight
@@ -177,15 +177,13 @@ class GEARS:
                                                adata = self.adata,
                                                threshold = coexpress_threshold,
                                                k = num_similar_genes_go_graph,
-                                               gene_list = self.pert_list,
+                                               pert_list= self.pert_list,
                                                data_path = self.data_path,
                                                data_name = self.dataset_name,
-                                               split = self.split,
-                                               seed = self.seed,
+                                               split = self.split, seed = self.seed,
                                                train_gene_set_size = self.train_gene_set_size,
                                                set2conditions = self.set2conditions,
-                                               gi_go = self.gi_go,
-                                               dataset = go_path)
+                                               default_pert_graph=self.default_pert_graph)
             sim_network = GeneSimNetwork(edge_list, self.pert_list, node_map = self.node_map_pert)
             self.config['G_go'] = sim_network.edge_index
             self.config['G_go_weight'] = sim_network.edge_weight
@@ -264,7 +262,7 @@ class GEARS:
             predall=[]
             for step, batch in enumerate(loader):
                 batch.to(self.device)
-                with torch.no_grad():
+                with torch.no_grad(), torch.cuda.amp.autocast(enabled = self.amp):
                     if self.config['uncertainty']:
                         p, unc = self.best_model(batch)
                         results_logvar['_'.join(pert)] = np.mean(unc.detach().cpu().numpy(), axis = 0)
@@ -367,7 +365,8 @@ class GEARS:
             
         self.model = self.model.to(self.device)
         best_model = deepcopy(self.model)
-
+        if self.config['model_type'] != 'maeautobin':
+            self.config['finetune_method'] = None
         if self.config['finetune_method'] == 'frozen':
             for name, p in self.model.named_parameters():
                 if "singlecell_model" in name:
@@ -384,74 +383,85 @@ class GEARS:
         else:
             optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay = weight_decay)
 
-        optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay = weight_decay)
+        #optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay = weight_decay)
         scheduler = StepLR(optimizer, step_size=1, gamma=0.5)
 
         min_val = np.inf
         print_sys('Start Training...')
-
+        
         for epoch in range(epochs):
             self.model.train()
             if self.config['finetune_method'] == 'frozen':
                 self.model.singlecell_model.eval()
-
-            for step, batch in enumerate(train_loader):
+            pbar = tqdm(
+                train_loader, 
+                desc=f"Epoch {epoch+1}/{epochs} [Train]", 
+                position=0,
+                leave=True,
+                ascii=True,
+                unit="batch",
+                disable=False,
+                file = sys.stderr,
+                miniters=int(len(train_loader)/20)
+            )
+            total_loss = 0
+            for step, batch in enumerate(pbar):
                 batch.to(self.device)
                 y = batch.y
-                if self.config['uncertainty']:
-                    pred, logvar = self.model(batch)
-                    loss = uncertainty_loss_fct(pred, logvar, y, batch.pert,
-                                      reg = self.config['uncertainty_reg'],
-                                      ctrl = self.ctrl_expression, 
-                                      dict_filter = self.dict_filter,
-                                      direction_lambda = self.config['direction_lambda'])
-                else:
-                    pred = self.model(batch)
-                    loss = loss_fct(pred, y, batch.pert,
-                                  ctrl = self.ctrl_expression, 
-                                  dict_filter = self.dict_filter,
-                                  direction_lambda = self.config['direction_lambda'])
+                with torch.cuda.amp.autocast(enabled = self.amp):
+                    if self.config['uncertainty']:
+                        pred, logvar = self.model(batch)
+                        loss = uncertainty_loss_fct(pred, logvar, y, batch.pert,
+                                        reg = self.config['uncertainty_reg'],
+                                        ctrl = self.ctrl_expression, 
+                                        dict_filter = self.dict_filter,
+                                        direction_lambda = self.config['direction_lambda'])
+                    else:
+                        pred = self.model(batch)
+                        loss = loss_fct(pred, y, batch.pert,
+                                    ctrl = self.ctrl_expression, 
+                                    dict_filter = self.dict_filter,
+                                    direction_lambda = self.config['direction_lambda'])
+                        
+                    # loss = loss / self.config['accumulation_steps']
+                    total_loss += loss.item()
+                    loss.backward()
                     
-                # loss = loss / self.config['accumulation_steps']
-                loss.backward()
-                nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
+                    nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
 
-                if (((step+1)%self.config['accumulation_steps'])==0) or (step+1==len(train_loader)):
-                    optimizer.step()
-                    optimizer.zero_grad()
+                    if (((step+1)%self.config['accumulation_steps'])==0) or (step+1==len(train_loader)):
+                        optimizer.step()
+                        optimizer.zero_grad()
 
-                if self.wandb:
-                    self.wandb.log({'training_loss': loss.item()})
+                    if self.wandb:
+                        self.wandb.log({'training_loss': loss.item()})
 
-                if step % 50 == 0:
-                    log = "Epoch {} Step {} Train Loss: {:.4f}" 
-                    print_sys(log.format(epoch + 1, step + 1, loss.item()))
+                    if step % (len(train_loader)//20) == 0:
+                        log = "Epoch {} Step {} Train Loss: {:.4f}" 
+                        print_sys(log.format(epoch + 1, step + 1, total_loss/(step+1)))
 
             scheduler.step()
             # Evaluate model performance on train and val set
-            train_res = evaluate(train_loader, self.model, self.config['uncertainty'], self.device)
-            val_res = evaluate(val_loader, self.model, self.config['uncertainty'], self.device)
-            train_metrics, _ = compute_metrics(train_res)
+            #train_res = evaluate(train_loader, self.model, self.config['uncertainty'], self.device)
+            val_res = evaluate(val_loader, self.model, self.config['uncertainty'], self.device, amp = self.amp)
+            #train_metrics, _ = compute_metrics(train_res)
             val_metrics, _ = compute_metrics(val_res)
 
             # Print epoch performance
             log = "Epoch {}: Train Overall MSE: {:.4f} " \
                   "Validation Overall MSE: {:.4f}. "
-            print_sys(log.format(epoch + 1, train_metrics['mse'], 
+            print_sys(log.format(epoch + 1, total_loss / len(train_loader), 
                              val_metrics['mse']))
             
             # Print epoch performance for DE genes
-            log = "Train Top 20 DE MSE: {:.4f} " \
-                  "Validation Top 20 DE MSE: {:.4f}. "
-            print_sys(log.format(train_metrics['mse_de'],
-                             val_metrics['mse_de']))
+            log = "Validation Top 20 DE MSE: {:.4f}. "
+            print_sys(log.format(val_metrics['mse_de']))
             
             if self.wandb:
                 metrics = ['mse', 'pearson']
                 for m in metrics:
-                    self.wandb.log({'train_' + m: train_metrics[m],
+                    self.wandb.log({
                                'val_'+m: val_metrics[m],
-                               'train_de_' + m: train_metrics[m + '_de'],
                                'val_de_'+m: val_metrics[m + '_de']})
                
             if val_metrics['mse_de'] < min_val:
@@ -472,7 +482,7 @@ class GEARS:
         # Model testing
         test_loader = self.dataloader['test_loader']
         print_sys("Start Testing...")
-        test_res = evaluate(test_loader, self.best_model, self.config['uncertainty'], self.device)   
+        test_res = evaluate(test_loader, self.best_model, self.config['uncertainty'], self.device, amp = self.amp)   
         test_metrics, test_pert_res = compute_metrics(test_res)    
         log = "Best performing model: Test Top 20 DE MSE: {:.4f}"
         print_sys(log.format(test_metrics['mse_de']))

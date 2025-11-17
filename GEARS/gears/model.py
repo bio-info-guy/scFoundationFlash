@@ -42,7 +42,6 @@ class GEARS_Model(torch.nn.Module):
         self.indv_out_hidden_size = args['decoder_hidden_size']
         self.num_layers_gene_pos = args['num_gene_gnn_layers']
         self.no_perturb = args['no_perturb']
-        self.cell_fitness_pred = args['cell_fitness_pred']
         self.pert_emb_lambda = 0.2
         
         # perturbation positional embedding added only to the perturbed genes
@@ -107,8 +106,6 @@ class GEARS_Model(torch.nn.Module):
             self.uncertainty_w = MLP([hidden_size, hidden_size*2, hidden_size, 1], last_layer_act='linear')
         
         #if self.cell_fitness_pred:
-        self.cell_fitness_mlp = MLP([self.num_genes, hidden_size*2, hidden_size, 1], last_layer_act='linear')
-        
         if args['model_type'] == 'maeautobin':
             from ..modules.encoders import MAEAutobinencoder
             self.singlecell_model = MAEAutobinencoder(args, hidden_size=hidden_size)
@@ -228,9 +225,7 @@ class GEARS_Model(torch.nn.Module):
                 out_logvar = self.uncertainty_w(base_emb)
                 out_logvar = torch.split(torch.flatten(out_logvar), self.num_genes)
                 return torch.stack(out), torch.stack(out_logvar)
-            
-            if self.cell_fitness_pred:
-                return torch.stack(out), self.cell_fitness_mlp(torch.stack(out))
+        
             
             return torch.stack(out)
         
